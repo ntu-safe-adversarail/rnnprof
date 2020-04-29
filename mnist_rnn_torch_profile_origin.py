@@ -51,6 +51,79 @@ data : n * 28 * 28  batch_size
 from os.path import expanduser
 mnist_dir = os.path.join(expanduser('~') , '.torch')
 
+
+def get_dt(batch_size=16, n_tr =-1, n_test=-1 ,normalize=True, sklearn_seed=123456):
+    '''
+        @param 
+            n_tr <0 
+                n_tr= 60000 
+            n_test <0 
+                n_test =10000
+    '''
+    import keras 
+    (x_train,y_train), (x_test, y_test) = keras.datasets.mnist.load_data()
+
+    index_4_7 = np.logical_or(y_train==4,y_train==7) 
+    x_train = x_train [index_4_7]
+    y_train = y_train [index_4_7]
+
+    index_4_7 = np.logical_or(y_test==4,y_test==7) 
+    x_test = x_test [index_4_7]
+    y_test = y_test [index_4_7]
+
+    from sklearn.model_selection import train_test_split
+    from sklearn.preprocessing import StandardScaler
+
+    if n_tr >0 :
+        x_train, _, y_train, _ = train_test_split(
+            x_train, y_train, train_size=n_tr, test_size=0, random_state=sklearn_seed)
+    else:
+        n_tr= len(x_train)# full dataset
+
+    if n_test >0 :
+        x_test, _, y_test, _ = train_test_split(
+            x_test, y_test, train_size=n_test, test_size=0, random_state=sklearn_seed+1)
+    else:
+        n_test = len(x_test)# full dataset
+
+    # process x
+    if normalize:
+        x_train= x_train.reshape(x_train.shape[0],-1)
+        x_test= x_test.reshape(x_test.shape[0],-1)
+
+        scaler = StandardScaler()
+        scaler.fit(x_train)
+        x_train = scaler.transform(x_train)
+        x_test = scaler.transform(x_test)
+
+        x_train= x_train.reshape(x_train.shape[0],28,28)
+        x_test= x_test.reshape(x_test.shape[0],28,28)
+
+
+
+
+    num_steps= int(np.ceil(n_tr / batch_size))
+
+    def fetch_func (seed):
+        np.random.seed(seed)
+        idx_list = np.array_split(np.random.permutation(n_tr), num_steps)
+
+        for one_idx in idx_list:
+            imgs,lbls= x_train[one_idx],y_train[one_idx]
+
+            yield torch.from_numpy(imgs).float(),torch.from_numpy(lbls).long(), one_idx
+    def fetch_func_test(seed=None):
+        idx_list = np.array_split(np.arange(n_tr), num_steps)
+
+        for one_idx in idx_list:
+            imgs,lbls= x_train[one_idx],y_train[one_idx]
+
+            yield torch.from_numpy(imgs).float(),torch.from_numpy(lbls).long()
+
+
+    return x_train ,y_train, x_test, y_test , fetch_func ,fetch_func_test, num_steps
+
+
 class TorchMnistiClassifier(Profiling):
     def __init__(self, model_type, save_dir, epoch=10):
 
@@ -95,29 +168,8 @@ class TorchMnistiClassifier(Profiling):
 
     def train(self):
         # MNIST dataset
-        train_dataset = torchvision.datasets.MNIST(root=mnist_dir,
-                                                   train=True,
-                                                   transform=transforms.ToTensor(),
-                                                   download=True)
 
-        test_dataset = torchvision.datasets.MNIST(root=mnist_dir,
-                                                  train=False,
-                                                  transform=transforms.ToTensor())
-
-        # Data loader
-        train_loader = torch.utils.data.DataLoader(dataset=train_dataset,
-                                                   batch_size=self.batch_size,
-                                                   shuffle=True)
-
-        test_loader = torch.utils.data.DataLoader(dataset=test_dataset,
-                                                  batch_size=self.batch_size,
-                                                  shuffle=False)
-
-
-
-
-
-
+        x_train ,y_train,x_test,y_test, fetch_func ,test_fetch_func, num_steps = get_dt(batch_size=self.batch_size)
 
 
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
@@ -126,10 +178,13 @@ class TorchMnistiClassifier(Profiling):
         criterion = nn.CrossEntropyLoss()
 
         # Train the model
-        total_step = len(train_loader)
+        total_step = num_steps#len(train_loader)
+
+        #total_step = len(train_loader)
         for epoch in range(self.n_epochs):
             epoch += 1
-            for i, (images, labels) in enumerate(train_loader):
+            for i , (images,labels,_) in enumerate(fetch_func(seed=epoch)):
+            #for i, (images, labels) in enumerate(train_loader):
                 images = images.reshape(-1, self.time_steps, self.n_inputs).to(device)
                 labels = labels.to(device)
 
@@ -153,7 +208,8 @@ class TorchMnistiClassifier(Profiling):
             with torch.no_grad():
                 correct = 0
                 total = 0
-                for images, labels in test_loader:
+                for images, labels in test_fetch_func(seed=epoch):
+                #for images, labels in test_loader:
                     images = images.reshape(-1, self.time_steps, self.n_inputs).to(device)
                     labels = labels.to(device)
                     _, outputs = self.model(images)
@@ -166,14 +222,19 @@ class TorchMnistiClassifier(Profiling):
         # torch.save(self.model.state_dict(), self.model_path)
 
     def do_profile(self):
+        '''
         train_dataset = torchvision.datasets.MNIST(root=mnist_dir,
+
                                                    train=True,
                                                    transform=transforms.ToTensor(),
                                                    download=True)
         train_loader = torch.utils.data.DataLoader(dataset=train_dataset,
                                                    batch_size=self.batch_size,
                                                    shuffle=True)
-        return self.predict_loader(train_loader)
+        '''
+        x_train ,y_train,x_test,y_test, fetch_func ,test_fetch_func, num_steps = get_dt(batch_size=self.batch_size)
+        #return self.predict_loader(train_loader)
+        return self.predict_loader(fetch_func)
 
 
         # (x_train, y_train), (_, _) = mnist.load_data()
@@ -221,12 +282,17 @@ if __name__ == "__main__":
     # print(os.path.dirname('a/b/c/a'))
     classifier = TorchMnistiClassifier(model_type='lstm', save_dir='../../data/mnist_rnn_torch')
 
+    '''
     test_dataset = torchvision.datasets.MNIST(root=mnist_dir,
                                               train=False,
                                               transform=transforms.ToTensor())
     test_loader = torch.utils.data.DataLoader(dataset=test_dataset,
                                               batch_size=100,
                                               shuffle=False)
+    '''
+    x_train ,y_train,x_test,y_test, fetch_func ,test_fetch_func, num_steps = get_dt()
+    test_loader = test_fetch_func()
+
     y = []
     x = []
     with torch.no_grad():
@@ -240,8 +306,8 @@ if __name__ == "__main__":
             _, predicted = torch.max(outputs.data, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
-            y.append(predicted.numpy())
-            x.append(labels.numpy())
+            y.append(predicted.cpu().numpy())
+            x.append(labels.cpu().numpy())
 
 
 
@@ -261,3 +327,4 @@ if __name__ == "__main__":
     #
 
     print(same)
+
